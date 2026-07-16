@@ -1,0 +1,201 @@
+; Developed by: Benjamin Menjivar
+; Mechanical Engineering Student
+; California State University, Northridge
+
+; INITIAL OBJECTIVE:
+; This AutoLISP routine filters a selected group of objects and keeps or edits
+; objects based on company drafting standards such as line length, polyline
+; length, block name, and dimension wording.
+;
+; MAIN PURPOSE:
+; - Select a group of drawing objects.
+; - Turn certain line lengths blue.
+; - Keep/select certain line and polyline lengths.
+; - Check dimensions for important keywords and turn matching dimensions blue.
+; - Return a final filtered selection set that stays highlighted in AutoCAD.
+;
+; IMPORTANT SETUP / CUSTOMIZATION:
+; 1) BLUE-LINE-LENGTHS controls which line lengths are turned blue.
+; 2) SELECT-LINE-LENGTHS controls which line lengths are selected/kept.
+; 3) SELECT-PLINE-LENGTHS controls which polyline lengths are selected/kept.
+; 4) DIM-WORDS controls which dimension text keywords are searched.
+; 5) DIM-BLUE-COLOR is currently set to AutoCAD color index 5 (blue).
+; 6) Tolerance values help the routine catch objects that are close to the
+;    target length instead of requiring a perfect decimal match.
+
+; ============================================================================
+; STEP 1 - Define Main Command And Load Visual LISP
+; ----------------------------------------------------------------------------
+; The command name typed in AutoCAD is V3. Visual LISP is loaded so the routine
+; can use vla-* and vlax-* functions.
+; ============================================================================
+
+(defun c:V3 (/ *error* doc ss out i ent obj typ keep len blk txt)
+
+(vl-load-com)
+
+; ============================================================================
+; STEP 2 - User Editable Filter Standards
+; ----------------------------------------------------------------------------
+; These lists control which objects are turned blue, selected, or checked for
+; keywords. This is the main customization area.
+; ============================================================================
+
+;; Filters to edit 
+
+	(setq BLUE-LINE-LENGTHS '(6.25 1.5 3.375 4.0 4.25 4.313 4.5 4.75 6.19 34.25 34.313 34.187 37.1875))
+	(setq SELECT-LINE-LENGTHS '(6.0 4.25 6.75))
+	(setq SELECT-PLINE-LENGTHS '(22.5 22.75 41.937 42.0625 42.5625))
+	(setq LENGTH-TOL 0.01)
+	(setq LINE-LENGTH-TOL 0.05)
+	(setq POLY-LENGTH-TOL 0.05)
+
+	(setq BLOCK-NAMES '("DOOR" "WINDOW"))
+	(setq DIM-WORDS '("FINISHED HOISTWAY" "ANCHOR POINT" "R/O" "ELEVATION CHANGE" "PIT" "CENTER LINE" "ROUGH OPENING"))
+	(setq DIM-BLUE-COLOR 5)
+
+;; End of Filters
+
+	(setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
+
+	
+	; Error handler closes the undo mark if the routine is interrupted.
+(defun *error* (msg)
+		(if doc (vla-EndUndoMark doc))
+		(if msg (princ (strcat "\nError: "msg)))
+		(princ)
+	)
+
+	
+	; Compares a measured length to a list of target values using a tolerance.
+(defun length-match-p (x lst tol)
+		(vl-some
+			'(lambda (n) (<= (abs (- x n)) tol))
+			lst
+		)
+	)
+
+	
+	; Searches dimension text for drafting keywords.
+(defun text-has-word-p (txt words)
+		(and txt
+			(vl-some
+				'(lambda (w)
+					(wcmatch (strcase txt) (strcat "*" (strcase w) "*"))
+				)
+				words
+			)
+		)
+	)
+
+	(defun get-block-name (obj)
+		(if (vlax-property-available-p obj 'EffectiveName)
+			(vla-get-EffectiveName obj)
+			(vla-get-Name obj)
+		)
+	)
+
+	(defun curve-length (ent)
+		(vlax-curve-getDistAtParam
+			ent
+			(vlax-curve-getEndParam ent)
+		)
+	)
+
+; ============================================================================
+; STEP 3 - Start One Undo Group
+; ----------------------------------------------------------------------------
+; This allows the user to undo the routine as one action instead of many edits.
+; ============================================================================
+
+(vla-StartUndoMark doc)
+
+	(prompt "\nSelect area/object group to filter: ")
+	(setq ss (ssget))
+
+	(if ss
+		(progn
+			(setq out (ssadd))
+			(setq i 0)
+
+; ============================================================================
+; STEP 4 - Scan Each Selected Object
+; ----------------------------------------------------------------------------
+; Each object is checked by type, length, name, or dimension keyword.
+; ============================================================================
+
+(while (< i (sslength ss))
+				(setq ent (ssname ss i))
+				(setq obj (vlax-ename->vla-object ent))
+				(setq typ (vla-get-ObjectName obj))
+				(setq keep nil)
+
+				(cond
+					;; Lines that turn blue
+
+					((= typ "AcDbLine")
+						(setq len (curve-length ent))
+
+						(cond
+							((length-match-p len BLUE-LINE-LENGTHS LENGTH-TOL)
+								(vla-put-Color obj DIM-BLUE-COLOR)
+								(ssadd ent out)
+							)
+							
+							((length-match-p len SELECT-LINE-LENGTHS LINE-LENGTH-TOL)
+								(setq Keep T)
+								(ssadd ent out)
+							)
+						)
+					)
+
+					((or (= typ "AcDbPolyline") (= typ "AcDb2dPolyline") (= typ "AcDb3dPolyline"))
+					
+					(setq len (curve-length ent))
+
+					(if (length-match-p len SELECT-PLINE-LENGTHS POLY-LENGTH-TOL)
+						(ssadd ent out)
+					)
+				)
+					Blocks by name
+
+					((= typ "AcDbBlockReference")
+						(setq blk (get-block-name obj))
+						(if (in-list-ci blk BLOCK-NAMES)
+							(setq keep T)
+						)
+					)
+
+					;; Dimensions by keyword, then turn blue
+			
+					((wcmatch typ "AcDb*Dimension")
+						(setq txt (vla-get-TextOverride obj))
+						(if (text-has-word-p txt DIM-WORDS)
+							(progn
+								(vla-put-Color obj DIM-BLUE-COLOR)
+								(setq keep T)
+							)
+						)
+					)
+				)
+
+				(if keep (ssadd ent out))
+				(setq i (1+ i))
+			)
+			
+			; Leave the final matching objects selected/highlighted for review.
+(sssetfirst nil out)
+			(prompt
+				(strcat
+					"\nFiltered selection complete. Objects Selected: "
+					(itoa (sslength out))
+				)
+			)
+		)
+		(prompt "\nNothing Selected.")
+	)
+
+	(vla-EndUndoMark doc)
+	(princ)
+
+)
