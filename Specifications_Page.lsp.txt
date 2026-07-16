@@ -92,7 +92,6 @@
 					)
 				)
 
-				
 				; Write the revised text back into the AutoCAD object.
 (vla-put-TextString obj txt)
 
